@@ -8,13 +8,17 @@ package modcmd
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"sort"
 
 	"cmd/go/internal/base"
+	"cmd/go/internal/cfg"
 	"cmd/go/internal/modload"
-	"cmd/go/internal/module"
 	"cmd/go/internal/par"
+	"cmd/go/internal/work"
+
+	"golang.org/x/mod/module"
 )
 
 var cmdGraph = &base.Command{
@@ -29,11 +33,23 @@ path@version, except for the main module, which has no @version suffix.
 	Run: runGraph,
 }
 
-func runGraph(cmd *base.Command, args []string) {
+func init() {
+	work.AddModCommonFlags(cmdGraph)
+}
+
+func runGraph(ctx context.Context, cmd *base.Command, args []string) {
 	if len(args) > 0 {
 		base.Fatalf("go mod graph: graph takes no arguments")
 	}
-	modload.LoadBuildList()
+	// Checks go mod expected behavior
+	if !modload.Enabled() {
+		if cfg.Getenv("GO111MODULE") == "off" {
+			base.Fatalf("go: modules disabled by GO111MODULE=off; see 'go help modules'")
+		} else {
+			base.Fatalf("go: cannot find main module; see 'go help modules'")
+		}
+	}
+	modload.LoadBuildList(ctx)
 
 	reqs := modload.MinReqs()
 	format := func(m module.Version) string {

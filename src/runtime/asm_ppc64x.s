@@ -113,6 +113,7 @@ TEXT runtime·breakpoint(SB),NOSPLIT|NOFRAME,$0-0
 TEXT runtime·asminit(SB),NOSPLIT|NOFRAME,$0-0
 	RET
 
+// Any changes must be reflected to runtime/cgo/gcc_aix_ppc64.S:.crosscall_ppc64
 TEXT _cgo_reginit(SB),NOSPLIT|NOFRAME,$0-0
 	// crosscall_ppc64 and crosscall2 need to reginit, but can't
 	// get at the 'runtime.reginit' symbol.
@@ -210,7 +211,7 @@ TEXT runtime·mcall(SB), NOSPLIT|NOFRAME, $0-8
 TEXT runtime·systemstack_switch(SB), NOSPLIT, $0-0
 	// We have several undefs here so that 16 bytes past
 	// $runtime·systemstack_switch lies within them whether or not the
-        // instructions that derive r2 from r12 are there.
+	// instructions that derive r2 from r12 are there.
 	UNDEF
 	UNDEF
 	UNDEF
@@ -832,14 +833,14 @@ TEXT runtime·cputicks(SB),NOSPLIT,$0-8
 	RET
 
 // AES hashing not implemented for ppc64
-TEXT runtime·aeshash(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	(R0), R1
-TEXT runtime·aeshash32(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	(R0), R1
-TEXT runtime·aeshash64(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	(R0), R1
-TEXT runtime·aeshashstr(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	(R0), R1
+TEXT runtime·memhash(SB),NOSPLIT|NOFRAME,$0-32
+	JMP	runtime·memhashFallback(SB)
+TEXT runtime·strhash(SB),NOSPLIT|NOFRAME,$0-24
+	JMP	runtime·strhashFallback(SB)
+TEXT runtime·memhash32(SB),NOSPLIT|NOFRAME,$0-24
+	JMP	runtime·memhash32Fallback(SB)
+TEXT runtime·memhash64(SB),NOSPLIT|NOFRAME,$0-24
+	JMP	runtime·memhash64Fallback(SB)
 
 TEXT runtime·return0(SB), NOSPLIT, $0
 	MOVW	$0, R3
@@ -847,7 +848,13 @@ TEXT runtime·return0(SB), NOSPLIT, $0
 
 // Called from cgo wrappers, this function returns g->m->curg.stack.hi.
 // Must obey the gcc calling convention.
+#ifdef GOOS_aix
+// On AIX, _cgo_topofstack is defined in runtime/cgo, because it must
+// be a longcall in order to prevent trampolines from ld.
+TEXT __cgo_topofstack(SB),NOSPLIT|NOFRAME,$0
+#else
 TEXT _cgo_topofstack(SB),NOSPLIT|NOFRAME,$0
+#endif
 	// g (R30) and R31 are callee-save in the C ABI, so save them
 	MOVD	g, R4
 	MOVD	R31, R5
@@ -873,23 +880,20 @@ TEXT _cgo_topofstack(SB),NOSPLIT|NOFRAME,$0
 // pointer in the correct place).
 // goexit+_PCQuantum is halfway through the usual global entry point prologue
 // that derives r2 from r12 which is a bit silly, but not harmful.
-TEXT runtime·goexit(SB),NOSPLIT|NOFRAME,$0-0
+TEXT runtime·goexit(SB),NOSPLIT|NOFRAME|TOPFRAME,$0-0
 	MOVD	24(R1), R2
 	BL	runtime·goexit1(SB)	// does not return
 	// traceback from goexit1 must hit code range of goexit
 	MOVD	R0, R0	// NOP
-
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
-	RET
 
 // prepGoExitFrame saves the current TOC pointer (i.e. the TOC pointer for the
 // module containing runtime) to the frame that goexit will execute in when
 // the goroutine exits. It's implemented in assembly mainly because that's the
 // easiest way to get access to R2.
 TEXT runtime·prepGoExitFrame(SB),NOSPLIT,$0-8
-      MOVD    sp+0(FP), R3
-      MOVD    R2, 24(R3)
-      RET
+	MOVD    sp+0(FP), R3
+	MOVD    R2, 24(R3)
+	RET
 
 TEXT runtime·addmoduledata(SB),NOSPLIT|NOFRAME,$0-0
 	ADD	$-8, R1
@@ -912,23 +916,23 @@ TEXT ·checkASM(SB),NOSPLIT,$0-1
 // - R20 is the destination of the write
 // - R21 is the value being written at R20.
 // It clobbers condition codes.
-// It does not clobber R0 through R15,
+// It does not clobber R0 through R17 (except special registers),
 // but may clobber any other register, *including* R31.
 TEXT runtime·gcWriteBarrier(SB),NOSPLIT,$112
 	// The standard prologue clobbers R31.
-	// We use R16 and R17 as scratch registers.
-	MOVD	g_m(g), R16
-	MOVD	m_p(R16), R16
-	MOVD	(p_wbBuf+wbBuf_next)(R16), R17
+	// We use R18 and R19 as scratch registers.
+	MOVD	g_m(g), R18
+	MOVD	m_p(R18), R18
+	MOVD	(p_wbBuf+wbBuf_next)(R18), R19
 	// Increment wbBuf.next position.
-	ADD	$16, R17
-	MOVD	R17, (p_wbBuf+wbBuf_next)(R16)
-	MOVD	(p_wbBuf+wbBuf_end)(R16), R16
-	CMP	R16, R17
+	ADD	$16, R19
+	MOVD	R19, (p_wbBuf+wbBuf_next)(R18)
+	MOVD	(p_wbBuf+wbBuf_end)(R18), R18
+	CMP	R18, R19
 	// Record the write.
-	MOVD	R21, -16(R17)	// Record value
-	MOVD	(R20), R16	// TODO: This turns bad writes into bad reads.
-	MOVD	R16, -8(R17)	// Record *slot
+	MOVD	R21, -16(R19)	// Record value
+	MOVD	(R20), R18	// TODO: This turns bad writes into bad reads.
+	MOVD	R18, -8(R19)	// Record *slot
 	// Is the buffer full? (flags set in CMP above)
 	BEQ	flush
 ret:
@@ -952,11 +956,12 @@ flush:
 	MOVD	R8, (FIXED_FRAME+56)(R1)
 	MOVD	R9, (FIXED_FRAME+64)(R1)
 	MOVD	R10, (FIXED_FRAME+72)(R1)
-	MOVD	R11, (FIXED_FRAME+80)(R1)
-	MOVD	R12, (FIXED_FRAME+88)(R1)
+	// R11, R12 may be clobbered by external-linker-inserted trampoline
 	// R13 is REGTLS
-	MOVD	R14, (FIXED_FRAME+96)(R1)
-	MOVD	R15, (FIXED_FRAME+104)(R1)
+	MOVD	R14, (FIXED_FRAME+80)(R1)
+	MOVD	R15, (FIXED_FRAME+88)(R1)
+	MOVD	R16, (FIXED_FRAME+96)(R1)
+	MOVD	R17, (FIXED_FRAME+104)(R1)
 
 	// This takes arguments R20 and R21.
 	CALL	runtime·wbBufFlush(SB)
@@ -971,8 +976,78 @@ flush:
 	MOVD	(FIXED_FRAME+56)(R1), R8
 	MOVD	(FIXED_FRAME+64)(R1), R9
 	MOVD	(FIXED_FRAME+72)(R1), R10
-	MOVD	(FIXED_FRAME+80)(R1), R11
-	MOVD	(FIXED_FRAME+88)(R1), R12
-	MOVD	(FIXED_FRAME+96)(R1), R14
-	MOVD	(FIXED_FRAME+104)(R1), R15
+	MOVD	(FIXED_FRAME+80)(R1), R14
+	MOVD	(FIXED_FRAME+88)(R1), R15
+	MOVD	(FIXED_FRAME+96)(R1), R16
+	MOVD	(FIXED_FRAME+104)(R1), R17
 	JMP	ret
+
+// Note: these functions use a special calling convention to save generated code space.
+// Arguments are passed in registers, but the space for those arguments are allocated
+// in the caller's stack frame. These stubs write the args into that stack space and
+// then tail call to the corresponding runtime handler.
+// The tail call makes these stubs disappear in backtraces.
+TEXT runtime·panicIndex(SB),NOSPLIT,$0-16
+	MOVD	R3, x+0(FP)
+	MOVD	R4, y+8(FP)
+	JMP	runtime·goPanicIndex(SB)
+TEXT runtime·panicIndexU(SB),NOSPLIT,$0-16
+	MOVD	R3, x+0(FP)
+	MOVD	R4, y+8(FP)
+	JMP	runtime·goPanicIndexU(SB)
+TEXT runtime·panicSliceAlen(SB),NOSPLIT,$0-16
+	MOVD	R4, x+0(FP)
+	MOVD	R5, y+8(FP)
+	JMP	runtime·goPanicSliceAlen(SB)
+TEXT runtime·panicSliceAlenU(SB),NOSPLIT,$0-16
+	MOVD	R4, x+0(FP)
+	MOVD	R5, y+8(FP)
+	JMP	runtime·goPanicSliceAlenU(SB)
+TEXT runtime·panicSliceAcap(SB),NOSPLIT,$0-16
+	MOVD	R4, x+0(FP)
+	MOVD	R5, y+8(FP)
+	JMP	runtime·goPanicSliceAcap(SB)
+TEXT runtime·panicSliceAcapU(SB),NOSPLIT,$0-16
+	MOVD	R4, x+0(FP)
+	MOVD	R5, y+8(FP)
+	JMP	runtime·goPanicSliceAcapU(SB)
+TEXT runtime·panicSliceB(SB),NOSPLIT,$0-16
+	MOVD	R3, x+0(FP)
+	MOVD	R4, y+8(FP)
+	JMP	runtime·goPanicSliceB(SB)
+TEXT runtime·panicSliceBU(SB),NOSPLIT,$0-16
+	MOVD	R3, x+0(FP)
+	MOVD	R4, y+8(FP)
+	JMP	runtime·goPanicSliceBU(SB)
+TEXT runtime·panicSlice3Alen(SB),NOSPLIT,$0-16
+	MOVD	R5, x+0(FP)
+	MOVD	R6, y+8(FP)
+	JMP	runtime·goPanicSlice3Alen(SB)
+TEXT runtime·panicSlice3AlenU(SB),NOSPLIT,$0-16
+	MOVD	R5, x+0(FP)
+	MOVD	R6, y+8(FP)
+	JMP	runtime·goPanicSlice3AlenU(SB)
+TEXT runtime·panicSlice3Acap(SB),NOSPLIT,$0-16
+	MOVD	R5, x+0(FP)
+	MOVD	R6, y+8(FP)
+	JMP	runtime·goPanicSlice3Acap(SB)
+TEXT runtime·panicSlice3AcapU(SB),NOSPLIT,$0-16
+	MOVD	R5, x+0(FP)
+	MOVD	R6, y+8(FP)
+	JMP	runtime·goPanicSlice3AcapU(SB)
+TEXT runtime·panicSlice3B(SB),NOSPLIT,$0-16
+	MOVD	R4, x+0(FP)
+	MOVD	R5, y+8(FP)
+	JMP	runtime·goPanicSlice3B(SB)
+TEXT runtime·panicSlice3BU(SB),NOSPLIT,$0-16
+	MOVD	R4, x+0(FP)
+	MOVD	R5, y+8(FP)
+	JMP	runtime·goPanicSlice3BU(SB)
+TEXT runtime·panicSlice3C(SB),NOSPLIT,$0-16
+	MOVD	R3, x+0(FP)
+	MOVD	R4, y+8(FP)
+	JMP	runtime·goPanicSlice3C(SB)
+TEXT runtime·panicSlice3CU(SB),NOSPLIT,$0-16
+	MOVD	R3, x+0(FP)
+	MOVD	R4, y+8(FP)
+	JMP	runtime·goPanicSlice3CU(SB)

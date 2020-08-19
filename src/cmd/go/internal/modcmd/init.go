@@ -9,6 +9,8 @@ package modcmd
 import (
 	"cmd/go/internal/base"
 	"cmd/go/internal/modload"
+	"cmd/go/internal/work"
+	"context"
 	"os"
 	"strings"
 )
@@ -27,7 +29,11 @@ To override this guess, supply the module path as an argument.
 	Run: runInit,
 }
 
-func runInit(cmd *base.Command, args []string) {
+func init() {
+	work.AddModCommonFlags(cmdInit)
+}
+
+func runInit(ctx context.Context, cmd *base.Command, args []string) {
 	modload.CmdModInit = true
 	if len(args) > 1 {
 		base.Fatalf("go mod init: too many arguments")
@@ -35,11 +41,16 @@ func runInit(cmd *base.Command, args []string) {
 	if len(args) == 1 {
 		modload.CmdModModule = args[0]
 	}
-	if _, err := os.Stat("go.mod"); err == nil {
+	if os.Getenv("GO111MODULE") == "off" {
+		base.Fatalf("go mod init: modules disabled by GO111MODULE=off; see 'go help modules'")
+	}
+	modFilePath := modload.ModFilePath()
+	if _, err := os.Stat(modFilePath); err == nil {
 		base.Fatalf("go mod init: go.mod already exists")
 	}
 	if strings.Contains(modload.CmdModModule, "@") {
 		base.Fatalf("go mod init: module path must not contain '@'")
 	}
 	modload.InitMod() // does all the hard work
+	modload.WriteGoMod()
 }

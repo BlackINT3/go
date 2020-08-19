@@ -119,7 +119,7 @@ var formatTests = []FormatTest{
 }
 
 func TestFormat(t *testing.T) {
-	// The numeric time represents Thu Feb  4 21:00:57.012345600 PST 2010
+	// The numeric time represents Thu Feb  4 21:00:57.012345600 PST 2009
 	time := Unix(0, 1233810057012345600)
 	for _, test := range formatTests {
 		result := time.Format(test.format)
@@ -536,12 +536,12 @@ var parseErrorTests = []ParseErrorTest{
 	{"Mon Jan _2 15:04:05.000 2006", "Thu Feb  4 23:00:59.-123 2010", "fractional second out of range"},
 	// issue 4502. StampNano requires exactly 9 digits of precision.
 	{StampNano, "Dec  7 11:22:01.000000", `cannot parse ".000000" as ".000000000"`},
-	{StampNano, "Dec  7 11:22:01.0000000000", "extra text: 0"},
+	{StampNano, "Dec  7 11:22:01.0000000000", `extra text: "0"`},
 	// issue 4493. Helpful errors.
-	{RFC3339, "2006-01-02T15:04:05Z07:00", `parsing time "2006-01-02T15:04:05Z07:00": extra text: 07:00`},
+	{RFC3339, "2006-01-02T15:04:05Z07:00", `parsing time "2006-01-02T15:04:05Z07:00": extra text: "07:00"`},
 	{RFC3339, "2006-01-02T15:04_abc", `parsing time "2006-01-02T15:04_abc" as "2006-01-02T15:04:05Z07:00": cannot parse "_abc" as ":"`},
 	{RFC3339, "2006-01-02T15:04:05_abc", `parsing time "2006-01-02T15:04:05_abc" as "2006-01-02T15:04:05Z07:00": cannot parse "_abc" as "Z07:00"`},
-	{RFC3339, "2006-01-02T15:04:05Z_abc", `parsing time "2006-01-02T15:04:05Z_abc": extra text: _abc`},
+	{RFC3339, "2006-01-02T15:04:05Z_abc", `parsing time "2006-01-02T15:04:05Z_abc": extra text: "_abc"`},
 	// invalid second followed by optional fractional seconds
 	{RFC3339, "2010-02-04T21:00:67.012345678-08:00", "second out of range"},
 	// issue 21113
@@ -708,5 +708,65 @@ func TestUnderscoreTwoThousand(t *testing.T) {
 	}
 	if m := time.Minute(); m != 38 {
 		t.Errorf("Incorrect minute, got %d", m)
+	}
+}
+
+// Issue 29918, 29916
+func TestStd0xParseError(t *testing.T) {
+	tests := []struct {
+		format, value, valueElemPrefix string
+	}{
+		{"01 MST", "0 MST", "0"},
+		{"01 MST", "1 MST", "1"},
+		{RFC850, "Thursday, 04-Feb-1 21:00:57 PST", "1"},
+	}
+	for _, tt := range tests {
+		_, err := Parse(tt.format, tt.value)
+		if err == nil {
+			t.Errorf("Parse(%q, %q) did not fail as expected", tt.format, tt.value)
+		} else if perr, ok := err.(*ParseError); !ok {
+			t.Errorf("Parse(%q, %q) returned error type %T, expected ParseError", tt.format, tt.value, perr)
+		} else if !strings.Contains(perr.Error(), "cannot parse") || !strings.HasPrefix(perr.ValueElem, tt.valueElemPrefix) {
+			t.Errorf("Parse(%q, %q) returned wrong parsing error message: %v", tt.format, tt.value, perr)
+		}
+	}
+}
+
+var monthOutOfRangeTests = []struct {
+	value string
+	ok    bool
+}{
+	{"00-01", false},
+	{"13-01", false},
+	{"01-01", true},
+}
+
+func TestParseMonthOutOfRange(t *testing.T) {
+	for _, test := range monthOutOfRangeTests {
+		_, err := Parse("01-02", test.value)
+		switch {
+		case !test.ok && err != nil:
+			if !strings.Contains(err.Error(), "month out of range") {
+				t.Errorf("%q: expected 'month' error, got %v", test.value, err)
+			}
+		case test.ok && err != nil:
+			t.Errorf("%q: unexpected error: %v", test.value, err)
+		case !test.ok && err == nil:
+			t.Errorf("%q: expected 'month' error, got none", test.value)
+		}
+	}
+}
+
+// Issue 37387.
+func TestParseYday(t *testing.T) {
+	t.Parallel()
+	for i := 1; i <= 365; i++ {
+		d := fmt.Sprintf("2020-%03d", i)
+		tm, err := Parse("2006-002", d)
+		if err != nil {
+			t.Errorf("unexpected error for %s: %v", d, err)
+		} else if tm.Year() != 2020 || tm.YearDay() != i {
+			t.Errorf("got year %d yearday %d, want %d %d", tm.Year(), tm.YearDay(), 2020, i)
+		}
 	}
 }

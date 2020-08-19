@@ -6,8 +6,8 @@
 package get
 
 import (
+	"context"
 	"fmt"
-	"go/build"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -108,20 +108,15 @@ var (
 )
 
 func init() {
-	work.AddBuildFlags(CmdGet)
+	work.AddBuildFlags(CmdGet, work.OmitModFlag|work.OmitModCommonFlags)
 	CmdGet.Run = runGet // break init loop
 	CmdGet.Flag.BoolVar(&Insecure, "insecure", Insecure, "")
 }
 
-func runGet(cmd *base.Command, args []string) {
+func runGet(ctx context.Context, cmd *base.Command, args []string) {
 	if cfg.ModulesEnabled {
 		// Should not happen: main.go should install the separate module-enabled get code.
 		base.Fatalf("go get: modules not implemented")
-	}
-	if cfg.GoModInGOPATH != "" {
-		// Warn about not using modules with GO111MODULE=auto when go.mod exists.
-		// To silence the warning, users can set GO111MODULE=off.
-		fmt.Fprintf(os.Stderr, "go get: warning: modules disabled by GO111MODULE=auto in GOPATH/src;\n\tignoring %s;\n\tsee 'go help modules'\n", base.ShortPath(cfg.GoModInGOPATH))
 	}
 
 	work.BuildInit()
@@ -177,13 +172,7 @@ func runGet(cmd *base.Command, args []string) {
 	// everything.
 	load.ClearPackageCache()
 
-	// In order to rebuild packages information completely,
-	// we need to clear commands cache. Command packages are
-	// referring to evicted packages from the package cache.
-	// This leads to duplicated loads of the standard packages.
-	load.ClearCmdCache()
-
-	pkgs := load.PackagesForBuild(args)
+	pkgs := load.PackagesForBuild(ctx, args)
 
 	// Phase 3. Install.
 	if *getD {
@@ -193,7 +182,7 @@ func runGet(cmd *base.Command, args []string) {
 		return
 	}
 
-	work.InstallPackages(args, pkgs)
+	work.InstallPackages(ctx, args, pkgs)
 }
 
 // downloadPaths prepares the list of paths to pass to download.
@@ -205,12 +194,28 @@ func downloadPaths(patterns []string) []string {
 	for _, arg := range patterns {
 		if strings.Contains(arg, "@") {
 			base.Fatalf("go: cannot use path@version syntax in GOPATH mode")
+			continue
+		}
+
+		// Guard against 'go get x.go', a common mistake.
+		// Note that package and module paths may end with '.go', so only print an error
+		// if the argument has no slash or refers to an existing file.
+		if strings.HasSuffix(arg, ".go") {
+			if !strings.Contains(arg, "/") {
+				base.Errorf("go get %s: arguments must be package or module paths", arg)
+				continue
+			}
+			if fi, err := os.Stat(arg); err == nil && !fi.IsDir() {
+				base.Errorf("go get: %s exists as a file, but 'go get' requires package arguments", arg)
+			}
 		}
 	}
+	base.ExitIfErrors()
+
 	var pkgs []string
 	for _, m := range search.ImportPathsQuiet(patterns) {
-		if len(m.Pkgs) == 0 && strings.Contains(m.Pattern, "...") {
-			pkgs = append(pkgs, m.Pattern)
+		if len(m.Pkgs) == 0 && strings.Contains(m.Pattern(), "...") {
+			pkgs = append(pkgs, m.Pattern())
 		} else {
 			pkgs = append(pkgs, m.Pkgs...)
 		}
@@ -240,7 +245,8 @@ func download(arg string, parent *load.Package, stk *load.ImportStack, mode int)
 	}
 	load1 := func(path string, mode int) *load.Package {
 		if parent == nil {
-			return load.LoadPackageNoFlags(path, stk)
+			mode := 0 // don't do module or vendor resolution
+			return load.LoadImport(path, base.Cwd, nil, stk, nil, mode)
 		}
 		return load.LoadImport(path, parent.Dir, parent, stk, nil, mode|load.ResolveModule)
 	}
@@ -284,7 +290,7 @@ func download(arg string, parent *load.Package, stk *load.ImportStack, mode int)
 		stk.Push(arg)
 		err := downloadPackage(p)
 		if err != nil {
-			base.Errorf("%s", &load.PackageError{ImportStack: stk.Copy(), Err: err.Error()})
+			base.Errorf("%s", &load.PackageError{ImportStack: stk.Copy(), Err: err})
 			stk.Pop()
 			return
 		}
@@ -295,10 +301,16 @@ func download(arg string, parent *load.Package, stk *load.ImportStack, mode int)
 		// We delay this until after reloadPackage so that the old entry
 		// for p has been replaced in the package cache.
 		if wildcardOkay && strings.Contains(arg, "...") {
-			if build.IsLocalImport(arg) {
-				args = search.MatchPackagesInFS(arg).Pkgs
+			match := search.NewMatch(arg)
+			if match.IsLocal() {
+				match.MatchDirs()
+				args = match.Dirs
 			} else {
-				args = search.MatchPackages(arg).Pkgs
+				match.MatchPackages()
+				args = match.Pkgs
+			}
+			for _, err := range match.Errs {
+				base.Errorf("%s", err)
 			}
 			isWildcard = true
 		}
@@ -365,7 +377,7 @@ func download(arg string, parent *load.Package, stk *load.ImportStack, mode int)
 				stk.Push(path)
 				err := &load.PackageError{
 					ImportStack: stk.Copy(),
-					Err:         "must be imported as " + path[j+len("vendor/"):],
+					Err:         load.ImportErrorf(path, "%s must be imported as %s", path, path[j+len("vendor/"):]),
 				}
 				stk.Pop()
 				base.Errorf("%s", err)
@@ -397,7 +409,7 @@ func downloadPackage(p *load.Package) error {
 		blindRepo      bool // set if the repo has unusual configuration
 	)
 
-	security := web.Secure
+	security := web.SecureOnly
 	if Insecure {
 		security = web.Insecure
 	}

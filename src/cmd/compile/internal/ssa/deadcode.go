@@ -76,6 +76,30 @@ func liveValues(f *Func, reachable []bool) (live []bool, liveOrderStmts []*Value
 		return
 	}
 
+	// Record all the inline indexes we need
+	var liveInlIdx map[int]bool
+	pt := f.Config.ctxt.PosTable
+	for _, b := range f.Blocks {
+		for _, v := range b.Values {
+			i := pt.Pos(v.Pos).Base().InliningIndex()
+			if i < 0 {
+				continue
+			}
+			if liveInlIdx == nil {
+				liveInlIdx = map[int]bool{}
+			}
+			liveInlIdx[i] = true
+		}
+		i := pt.Pos(b.Pos).Base().InliningIndex()
+		if i < 0 {
+			continue
+		}
+		if liveInlIdx == nil {
+			liveInlIdx = map[int]bool{}
+		}
+		liveInlIdx[i] = true
+	}
+
 	// Find all live values
 	q := f.Cache.deadcode.q[:0]
 	defer func() { f.Cache.deadcode.q = q }()
@@ -86,11 +110,13 @@ func liveValues(f *Func, reachable []bool) (live []bool, liveOrderStmts []*Value
 		if !reachable[b.ID] {
 			continue
 		}
-		if v := b.Control; v != nil && !live[v.ID] {
-			live[v.ID] = true
-			q = append(q, v)
-			if v.Pos.IsStmt() != src.PosNotStmt {
-				liveOrderStmts = append(liveOrderStmts, v)
+		for _, v := range b.ControlValues() {
+			if !live[v.ID] {
+				live[v.ID] = true
+				q = append(q, v)
+				if v.Pos.IsStmt() != src.PosNotStmt {
+					liveOrderStmts = append(liveOrderStmts, v)
+				}
 			}
 		}
 		for _, v := range b.Values {
@@ -103,6 +129,13 @@ func liveValues(f *Func, reachable []bool) (live []bool, liveOrderStmts []*Value
 			}
 			if v.Type.IsVoid() && !live[v.ID] {
 				// The only Void ops are nil checks and inline marks.  We must keep these.
+				if v.Op == OpInlMark && !liveInlIdx[int(v.AuxInt)] {
+					// We don't need marks for bodies that
+					// have been completely optimized away.
+					// TODO: save marks only for bodies which
+					// have a faulting instruction or a call?
+					continue
+				}
 				live[v.ID] = true
 				q = append(q, v)
 				if v.Pos.IsStmt() != src.PosNotStmt {
@@ -209,8 +242,9 @@ func deadcode(f *Func) {
 			f.NamedValues[name] = values[:j]
 		}
 	}
-	for k := len(f.Names) - 1; k >= i; k-- {
-		f.Names[k] = LocalSlot{}
+	clearNames := f.Names[i:]
+	for j := range clearNames {
+		clearNames[j] = LocalSlot{}
 	}
 	f.Names = f.Names[:i]
 
@@ -221,13 +255,13 @@ func deadcode(f *Func) {
 	for i, b := range f.Blocks {
 		if !reachable[b.ID] {
 			// TODO what if control is statement boundary? Too late here.
-			b.SetControl(nil)
+			b.ResetControls()
 		}
 		for _, v := range b.Values {
 			if !live[v.ID] {
 				v.resetArgs()
 				if v.Pos.IsStmt() == src.PosIsStmt && reachable[b.ID] {
-					pendingLines.set(v.Pos.Line(), int32(i)) // TODO could be more than one pos for a line
+					pendingLines.set(v.Pos, int32(i)) // TODO could be more than one pos for a line
 				}
 			}
 		}
@@ -236,20 +270,19 @@ func deadcode(f *Func) {
 	// Find new homes for lost lines -- require earliest in data flow with same line that is also in same block
 	for i := len(order) - 1; i >= 0; i-- {
 		w := order[i]
-		if j := pendingLines.get(w.Pos.Line()); j > -1 && f.Blocks[j] == w.Block {
+		if j := pendingLines.get(w.Pos); j > -1 && f.Blocks[j] == w.Block {
 			w.Pos = w.Pos.WithIsStmt()
-			pendingLines.remove(w.Pos.Line())
+			pendingLines.remove(w.Pos)
 		}
 	}
 
 	// Any boundary that failed to match a live value can move to a block end
-	for i := 0; i < pendingLines.size(); i++ {
-		l, bi := pendingLines.getEntry(i)
+	pendingLines.foreachEntry(func(j int32, l uint, bi int32) {
 		b := f.Blocks[bi]
-		if b.Pos.Line() == l {
+		if b.Pos.Line() == l && b.Pos.FileIndex() == j {
 			b.Pos = b.Pos.WithIsStmt()
 		}
-	}
+	})
 
 	// Remove dead values from blocks' value list. Return dead
 	// values to the allocator.
@@ -263,12 +296,7 @@ func deadcode(f *Func) {
 				f.freeValue(v)
 			}
 		}
-		// aid GC
-		tail := b.Values[i:]
-		for j := range tail {
-			tail[j] = nil
-		}
-		b.Values = b.Values[:i]
+		b.truncateValues(i)
 	}
 
 	// Remove dead blocks from WBLoads list.
@@ -279,8 +307,9 @@ func deadcode(f *Func) {
 			i++
 		}
 	}
-	for j := i; j < len(f.WBLoads); j++ {
-		f.WBLoads[j] = nil
+	clearWBLoads := f.WBLoads[i:]
+	for j := range clearWBLoads {
+		clearWBLoads[j] = nil
 	}
 	f.WBLoads = f.WBLoads[:i]
 

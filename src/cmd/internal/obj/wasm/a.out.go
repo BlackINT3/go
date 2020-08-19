@@ -48,6 +48,12 @@ const (
 	ADrop // opcode 0x1A
 	ASelect
 
+	ALocalGet // opcode 0x20
+	ALocalSet
+	ALocalTee
+	AGlobalGet
+	AGlobalSet
+
 	AI32Load // opcode 0x28
 	AI64Load
 	AF32Load
@@ -210,8 +216,22 @@ const (
 	AI64ReinterpretF64
 	AF32ReinterpretI32
 	AF64ReinterpretI64
+	AI32Extend8S
+	AI32Extend16S
+	AI64Extend8S
+	AI64Extend16S
+	AI64Extend32S
 
-	// End of low-level WebAssembly instructions.
+	AI32TruncSatF32S // opcode 0xFC 0x00
+	AI32TruncSatF32U
+	AI32TruncSatF64S
+	AI32TruncSatF64U
+	AI64TruncSatF32S
+	AI64TruncSatF32U
+	AI64TruncSatF64S
+	AI64TruncSatF64U
+
+	ALast // Sentinel: End of low-level WebAssembly instructions.
 
 	ARESUMEPOINT
 	// ACALLNORESUME is a call which is not followed by a resume point.
@@ -236,9 +256,7 @@ const (
 
 const (
 	// globals
-	REG_PC_F = obj.RBaseWasm + iota
-	REG_PC_B
-	REG_SP // SP is currently 32-bit, until 64-bit memory operations are available
+	REG_SP = obj.RBaseWasm + iota // SP is currently 32-bit, until 64-bit memory operations are available
 	REG_CTXT
 	REG_g
 	// RET* are used by runtime.return0 and runtime.reflectcall. These functions pass return values in registers.
@@ -248,7 +266,7 @@ const (
 	REG_RET3
 	REG_PAUSE
 
-	// locals
+	// i32 locals
 	REG_R0
 	REG_R1
 	REG_R2
@@ -265,6 +283,8 @@ const (
 	REG_R13
 	REG_R14
 	REG_R15
+
+	// f32 locals
 	REG_F0
 	REG_F1
 	REG_F2
@@ -282,9 +302,29 @@ const (
 	REG_F14
 	REG_F15
 
+	// f64 locals
+	REG_F16
+	REG_F17
+	REG_F18
+	REG_F19
+	REG_F20
+	REG_F21
+	REG_F22
+	REG_F23
+	REG_F24
+	REG_F25
+	REG_F26
+	REG_F27
+	REG_F28
+	REG_F29
+	REG_F30
+	REG_F31
+
+	REG_PC_B // also first parameter, i32
+
 	MAXREG
 
-	MINREG  = REG_PC_F
+	MINREG  = REG_SP
 	REGSP   = REG_SP
 	REGCTXT = REG_CTXT
 	REGG    = REG_g
